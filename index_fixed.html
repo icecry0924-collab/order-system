@@ -1,0 +1,728 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>校園點餐</title>
+</head>
+<body>
+
+<h2>輸入學號登入</h2>
+<input id="studentId" placeholder="學號">
+<button onclick="login()">登入</button>
+<p id="message" style="color: red; margin: 0.5em 0;"></p>
+
+<h2>餘額：<span id="balance">0</span></h2>
+
+<h2>新增餐點</h2>
+<input id="menuItemName" placeholder="餐點名稱">
+<input id="menuItemPrice" type="number" min="1" placeholder="價格">
+<button onclick="addMenuItem()">新增餐點</button>
+<p style="font-size:0.9em; color:#555; margin:0.5em 0 1em 0;">所有登入的使用者都可以新增餐點到菜單。</p>
+
+<div id="admin-panel" style="display:none; margin-top:1em; padding:0.5em; border:1px solid #ccc; background:#f9f9f9;">
+  <h2>管理員儲值</h2>
+  <input id="adminTargetId" placeholder="學生學號">
+  <input id="adminTopupAmount" type="number" min="1" placeholder="儲值金額">
+  <button onclick="adminTopUp()">管理員儲值</button>
+  <p style="font-size:0.9em; color:#555; margin:0.5em 0 0 0;">此功能僅限管理員使用，其他使用者無法自行儲值。</p>
+
+  <hr style="margin:1em 0;">
+
+  <h2>查看訂單紀錄</h2>
+  <input id="viewOrdersStudentId" placeholder="學生學號">
+  <button onclick="viewStudentOrders()">查看訂單</button>
+  <button onclick="viewTodayAllOrders()" style="margin-left:0.5em;">查看當天所有訂單</button>
+  <ul id="adminOrdersList" style="margin-top:0.5em;"></ul>
+
+  <hr style="margin:1em 0;">
+
+  <h2>退單申請</h2>
+  <ul id="refundRequestsList" style="margin-top:0.5em;"></ul>
+  <button onclick="loadRefundRequests()" style="margin-top:0.5em;">重新載入退單申請</button>
+</div>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+import { getFirestore, doc, getDoc, setDoc, collection, getDocs, addDoc, deleteDoc, query, where, serverTimestamp, Timestamp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyAQbOL7vN3MOmP5UmS9kTpR447k-df5wCg",
+  authDomain: "order-system-aef31.firebaseapp.com",
+  projectId: "order-system-aef31",
+  storageBucket: "order-system-aef31.firebasestorage.app",
+  messagingSenderId: "645966046768",
+  appId: "1:645966046768:web:ef910b73be494f265f2ff5"
+};
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+
+let currentId = null;
+let currentRole = "user";
+let shoppingCart = [];
+
+function showMessage(text, color = "red") {
+  const message = document.getElementById("message");
+  message.innerText = text;
+  message.style.color = color;
+}
+
+function updateRoleView(role) {
+  const adminPanel = document.getElementById("admin-panel");
+  adminPanel.style.display = role === "admin" ? "block" : "none";
+}
+
+window.login = async function () {
+  const studentId = document.getElementById("studentId").value.trim();
+  showMessage("");
+
+  if (!studentId) {
+    showMessage("請輸入學號後再登入。");
+    return;
+  }
+
+  try {
+    await signInAnonymously(auth);
+    currentId = studentId;
+
+    const ref = doc(db, "users", studentId);
+    const snap = await getDoc(ref);
+    let userData;
+
+    if (!snap.exists()) {
+      userData = {
+        balance: 0,
+        role: studentId === "admin" ? "admin" : "user"
+      };
+      await setDoc(ref, userData);
+    } else {
+      userData = snap.data();
+      if (!userData.role) {
+        userData.role = "user";
+        await setDoc(ref, { role: "user" }, { merge: true });
+      }
+    }
+
+    currentRole = userData.role || "user";
+    updateRoleView(currentRole);
+
+    await loadBalance();
+    await loadMenu();
+    await loadOrderHistory();
+    showMessage("登入成功，已載入菜單。", "green");
+  } catch (error) {
+    console.error(error);
+    showMessage("登入失敗：" + (error.message || error), "red");
+  }
+};
+
+window.adminTopUp = async function () {
+  if (currentRole !== "admin") {
+    showMessage("只有管理員可以執行此操作。", "red");
+    return;
+  }
+
+  const targetId = document.getElementById("adminTargetId").value.trim();
+  const amount = Number(document.getElementById("adminTopupAmount").value);
+
+  if (!targetId) {
+    showMessage("請輸入要儲值的學生學號。");
+    return;
+  }
+  if (!amount || amount <= 0) {
+    showMessage("請輸入正確的儲值金額。");
+    return;
+  }
+
+  try {
+    const ref = doc(db, "users", targetId);
+    const snap = await getDoc(ref);
+    const balance = snap.data()?.balance ?? 0;
+    const role = snap.exists() ? snap.data()?.role || "user" : "user";
+
+    await setDoc(ref, { balance: balance + amount, role }, { merge: true });
+    showMessage("已替 " + targetId + " 儲值 " + amount + " 元。", "green");
+  } catch (error) {
+    console.error(error);
+    showMessage("管理員儲值失敗，請稍後再試。", "red");
+  }
+};
+
+window.addMenuItem = async function () {
+  if (!currentId) {
+    showMessage("請先登入才能新增餐點。", "red");
+    return;
+  }
+
+  const name = document.getElementById("menuItemName").value.trim();
+  const price = Number(document.getElementById("menuItemPrice").value);
+
+  if (!name) {
+    showMessage("請輸入餐點名稱。", "red");
+    return;
+  }
+  if (!price || price <= 0) {
+    showMessage("請輸入正確的餐點價格。", "red");
+    return;
+  }
+
+  try {
+    await addDoc(collection(db, "menu"), {
+      name,
+      price,
+      createdAt: serverTimestamp()
+    });
+    document.getElementById("menuItemName").value = "";
+    document.getElementById("menuItemPrice").value = "";
+    await loadMenu();
+    showMessage("已新增餐點：" + name + "，價格 " + price + " 元。", "green");
+  } catch (error) {
+    console.error(error);
+    showMessage("新增餐點失敗，請稍後再試。", "red");
+  }
+};
+
+window.deleteMenuItem = async function (itemId) {
+  if (currentRole !== "admin") {
+    showMessage("只有管理員可以刪除餐點。", "red");
+    return;
+  }
+
+  if (!confirm("確定要刪除此餐點嗎?")) {
+    return;
+  }
+
+  try {
+    await deleteDoc(doc(db, "menu", itemId));
+    await loadMenu();
+    showMessage("已成功刪除餐點。", "green");
+  } catch (error) {
+    console.error(error);
+    showMessage("刪除餐點失敗，請稍後再試。", "red");
+  }
+};
+
+window.viewStudentOrders = async function () {
+  if (currentRole !== "admin") {
+    showMessage("只有管理員可以查看他人訂單。", "red");
+    return;
+  }
+
+  const studentId = document.getElementById("viewOrdersStudentId").value.trim();
+  if (!studentId) {
+    showMessage("請輸入要查看的學生學號。");
+    return;
+  }
+
+  try {
+    const ordersQuery = query(
+      collection(db, "orders"),
+      where("userId", "==", studentId)
+    );
+    const querySnapshot = await getDocs(ordersQuery);
+    const adminOrdersList = document.getElementById("adminOrdersList");
+    adminOrdersList.innerHTML = "";
+
+    if (querySnapshot.empty) {
+      adminOrdersList.innerHTML = "<li>" + studentId + " 目前沒有訂單紀錄。</li>";
+      return;
+    }
+
+    const orders = [];
+    querySnapshot.forEach((docSnap) => {
+      orders.push(docSnap.data());
+    });
+
+    orders.sort((a, b) => {
+      const timeA = a.createdAt?.toDate ? a.createdAt.toDate().getTime() : 0;
+      const timeB = b.createdAt?.toDate ? b.createdAt.toDate().getTime() : 0;
+      return timeB - timeA;
+    });
+
+    let totalPrice = 0;
+    orders.forEach((order) => {
+      const li = document.createElement("li");
+      const time = order.createdAt?.toDate ? order.createdAt.toDate().toLocaleString() : "幾秒前";
+      li.innerText = time + "：" + order.name + " - " + order.price + " 元";
+      adminOrdersList.appendChild(li);
+      totalPrice += order.price;
+    });
+
+    const summaryLi = document.createElement("li");
+    summaryLi.style.fontWeight = "bold";
+    summaryLi.innerText = "合計消費：" + totalPrice + " 元";
+    adminOrdersList.appendChild(summaryLi);
+
+    showMessage("已載入 " + studentId + " 的訂單紀錄。", "green");
+  } catch (error) {
+    console.error(error);
+    showMessage("查看訂單紀錄失敗，請稍後再試。", "red");
+  }
+};
+
+window.viewTodayAllOrders = async function () {
+  if (currentRole !== "admin") {
+    showMessage("只有管理員可以查看當天所有訂單。", "red");
+    return;
+  }
+
+  try {
+    // 計算今天的開始和結束時間
+    const now = new Date();
+    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const endOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+
+    const startTimestamp = Timestamp.fromDate(startOfDay);
+    const endTimestamp = Timestamp.fromDate(endOfDay);
+
+    // 查詢今天的所有訂單
+    const ordersQuery = query(
+      collection(db, "orders"),
+      where("createdAt", ">=", startTimestamp),
+      where("createdAt", "<", endTimestamp)
+    );
+
+    const querySnapshot = await getDocs(ordersQuery);
+    const adminOrdersList = document.getElementById("adminOrdersList");
+    adminOrdersList.innerHTML = "";
+
+    if (querySnapshot.empty) {
+      adminOrdersList.innerHTML = "<li>今天目前沒有任何訂單。</li>";
+      return;
+    }
+
+    const orders = [];
+    querySnapshot.forEach((docSnap) => {
+      orders.push(docSnap.data());
+    });
+
+    // 按時間排序（最新的在前面）
+    orders.sort((a, b) => {
+      const timeA = a.createdAt?.toDate ? a.createdAt.toDate().getTime() : 0;
+      const timeB = b.createdAt?.toDate ? b.createdAt.toDate().getTime() : 0;
+      return timeB - timeA;
+    });
+
+    // 統計每個學生的消費和每個餐點的銷售
+    const studentTotals = {};
+    const itemTotals = {};
+    let totalRevenue = 0;
+
+    orders.forEach((order) => {
+      const studentId = order.userId;
+      const itemName = order.name;
+
+      // 統計學生消費
+      if (!studentTotals[studentId]) {
+        studentTotals[studentId] = { count: 0, total: 0, orders: [] };
+      }
+      studentTotals[studentId].count++;
+      studentTotals[studentId].total += order.price;
+      studentTotals[studentId].orders.push(order);
+
+      // 統計餐點銷售
+      if (!itemTotals[itemName]) {
+        itemTotals[itemName] = { count: 0, total: 0 };
+      }
+      itemTotals[itemName].count++;
+      itemTotals[itemName].total += order.price;
+
+      totalRevenue += order.price;
+    });
+
+    // 顯示每個學生的訂單
+    for (const [studentId, data] of Object.entries(studentTotals)) {
+      const studentHeader = document.createElement("li");
+      studentHeader.style.fontWeight = "bold";
+      studentHeader.style.marginTop = "1em";
+      studentHeader.style.borderTop = "1px solid #ccc";
+      studentHeader.style.paddingTop = "0.5em";
+      studentHeader.innerText = "學生 " + studentId + " - 共 " + data.count + " 筆訂單，總計 " + data.total + " 元";
+      adminOrdersList.appendChild(studentHeader);
+
+      // 顯示該學生的所有訂單
+      data.orders.forEach((order) => {
+        const li = document.createElement("li");
+        const time = order.createdAt?.toDate ? order.createdAt.toDate().toLocaleString() : "幾秒前";
+        li.innerText = "  " + time + "：" + order.name + " - " + order.price + " 元";
+        li.style.marginLeft = "1em";
+        adminOrdersList.appendChild(li);
+      });
+    }
+
+    // 顯示單品項銷售統計
+    const itemHeader = document.createElement("li");
+    itemHeader.style.fontWeight = "bold";
+    itemHeader.style.fontSize = "1.1em";
+    itemHeader.style.marginTop = "1em";
+    itemHeader.style.borderTop = "1px solid #666";
+    itemHeader.style.paddingTop = "0.5em";
+    itemHeader.innerText = "單品項銷售統計";
+    adminOrdersList.appendChild(itemHeader);
+
+    // 按銷售額排序餐點統計
+    const sortedItems = Object.entries(itemTotals).sort((a, b) => b[1].total - a[1].total);
+
+    sortedItems.forEach(([itemName, data]) => {
+      const li = document.createElement("li");
+      li.innerText = itemName + " - 銷售 " + data.count + " 份，總計 " + data.total + " 元";
+      li.style.marginLeft = "1em";
+      adminOrdersList.appendChild(li);
+    });
+
+    // 顯示總營收
+    const summaryLi = document.createElement("li");
+    summaryLi.style.fontWeight = "bold";
+    summaryLi.style.fontSize = "1.1em";
+    summaryLi.style.marginTop = "1em";
+    summaryLi.style.borderTop = "2px solid #000";
+    summaryLi.style.paddingTop = "0.5em";
+    summaryLi.innerText = "今日總營收：" + totalRevenue + " 元";
+    adminOrdersList.appendChild(summaryLi);
+
+    showMessage("已載入今天所有訂單，共 " + orders.length + " 筆。", "green");
+  } catch (error) {
+    console.error(error);
+    showMessage("查看當天訂單失敗，請稍後再試。", "red");
+  }
+};
+
+async function loadBalance() {
+  if (!currentId) return;
+  const snap = await getDoc(doc(db, "users", currentId));
+  document.getElementById("balance").innerText = snap.data()?.balance ?? 0;
+}
+
+async function loadMenu() {
+  const menuList = document.getElementById("menu");
+  menuList.innerHTML = "";
+
+  try {
+    const querySnapshot = await getDocs(collection(db, "menu"));
+
+    if (querySnapshot.empty) {
+      menuList.innerHTML = "<li>目前沒有菜單資料。</li>";
+      return;
+    }
+
+    querySnapshot.forEach((docSnap) => {
+      const item = docSnap.data();
+      const itemId = docSnap.id;
+      const li = document.createElement("li");
+      let html = item.name + " - " + item.price + " <button onclick=\"order(" + item.price + ", '" + item.name + "')\" >點餐</button>";
+      if (currentRole === "admin") {
+        html += "<button onclick=\"deleteMenuItem('" + itemId + "')\" style=\"background-color: #ff6b6b; color: white;\">刪除</button>";
+      } else {
+        html += "<button onclick=\"addToCart(" + item.price + ", '" + item.name + "')\" >加入購物車</button>";
+      }
+      li.innerHTML = html;
+      menuList.appendChild(li);
+    });
+  } catch (error) {
+    console.error(error);
+    menuList.innerHTML = "<li>載入菜單失敗，請檢查 Firebase 設定。</li>";
+  }
+}
+
+async function loadOrderHistory() {
+  const historyList = document.getElementById("orderHistory");
+  historyList.innerHTML = "";
+  if (!currentId) {
+    historyList.innerHTML = "<li>請先登入查看。</li>";
+    return;
+  }
+
+  try {
+    const ordersQuery = query(
+      collection(db, "orders"),
+      where("userId", "==", currentId)
+    );
+    const querySnapshot = await getDocs(ordersQuery);
+
+    if (querySnapshot.empty) {
+      historyList.innerHTML = "<li>目前沒有點餐紀錄。</li>";
+      return;
+    }
+
+    const orders = [];
+    querySnapshot.forEach((docSnap) => {
+      const order = docSnap.data();
+      order.docId = docSnap.id;
+      orders.push(order);
+    });
+
+    orders.sort((a, b) => {
+      const timeA = a.createdAt?.toDate ? a.createdAt.toDate().getTime() : 0;
+      const timeB = b.createdAt?.toDate ? b.createdAt.toDate().getTime() : 0;
+      return timeB - timeA;
+    });
+
+    orders.forEach((order) => {
+      const li = document.createElement("li");
+      const time = order.createdAt?.toDate ? order.createdAt.toDate().toLocaleString() : "幾秒前";
+      li.innerText = time + "：" + order.name + " - " + order.price + " 元";
+      
+      if (currentRole !== "admin" && order.docId) {
+        const refundBtn = document.createElement("button");
+        refundBtn.innerText = "申請退單";
+        refundBtn.style.cssText = "background-color: #ffa500; color: white; margin-left: 0.5em; cursor: pointer;";
+        refundBtn.onclick = () => requestRefund(order.docId, order.name, order.price);
+        li.appendChild(refundBtn);
+      }
+      
+      historyList.appendChild(li);
+    });
+  } catch (error) {
+    console.error(error);
+    historyList.innerHTML = "<li>載入點餐紀錄失敗，請檢查權限。</li>";
+  }
+}
+
+window.order = async function (price, name) {
+  if (!currentId) {
+    showMessage("請先登入才能點餐。");
+    return;
+  }
+
+  try {
+    const ref = doc(db, "users", currentId);
+    const snap = await getDoc(ref);
+    const balance = snap.data()?.balance ?? 0;
+
+    if (balance < price) {
+      showMessage("餘額不足，無法點餐。", "red");
+      return;
+    }
+
+    await setDoc(ref, { balance: balance - price }, { merge: true });
+    await addDoc(collection(db, "orders"), {
+      userId: currentId,
+      name,
+      price,
+      createdAt: serverTimestamp()
+    });
+    await loadBalance();
+    await loadOrderHistory();
+    showMessage("已成功訂購：" + name + "，扣除 " + price + " 元。", "green");
+  } catch (error) {
+    console.error(error);
+    showMessage("點餐失敗，請稍後再試。", "red");
+  }
+};
+
+window.addToCart = function (price, name) {
+  if (!currentId) {
+    showMessage("請先登入才能加入購物車。");
+    return;
+  }
+
+  shoppingCart.push({ name, price });
+  showMessage("已將 " + name + " 加入購物車。", "green");
+  displayCart();
+};
+
+window.removeFromCart = function (index) {
+  shoppingCart.splice(index, 1);
+  displayCart();
+};
+
+window.clearCart = function () {
+  if (shoppingCart.length === 0) {
+    showMessage("購物車已是空的。");
+    return;
+  }
+  if (confirm("確定要清空購物車嗎?")) {
+    shoppingCart = [];
+    displayCart();
+    showMessage("已清空購物車。", "green");
+  }
+};
+
+window.checkoutCart = async function () {
+  if (!currentId) {
+    showMessage("請先登入才能結帳。");
+    return;
+  }
+
+  if (shoppingCart.length === 0) {
+    showMessage("購物車是空的，請先加入餐點。");
+    return;
+  }
+
+  const totalPrice = shoppingCart.reduce((sum, item) => sum + item.price, 0);
+
+  try {
+    const ref = doc(db, "users", currentId);
+    const snap = await getDoc(ref);
+    const balance = snap.data()?.balance ?? 0;
+
+    if (balance < totalPrice) {
+      showMessage("餘額不足，需要 " + totalPrice + " 元，目前餘額 " + balance + " 元。", "red");
+      return;
+    }
+
+    await setDoc(ref, { balance: balance - totalPrice }, { merge: true });
+
+    for (const item of shoppingCart) {
+      await addDoc(collection(db, "orders"), {
+        userId: currentId,
+        name: item.name,
+        price: item.price,
+        createdAt: serverTimestamp()
+      });
+    }
+
+    shoppingCart = [];
+    displayCart();
+    await loadBalance();
+    await loadOrderHistory();
+    showMessage("已成功結帳，扣除 " + totalPrice + " 元。", "green");
+  } catch (error) {
+    console.error(error);
+    showMessage("結帳失敗，請稍後再試。", "red");
+  }
+};
+
+function displayCart() {
+  const cartList = document.getElementById("cartItems");
+  const cartTotal = document.getElementById("cartTotal");
+  const checkoutBtn = document.getElementById("checkoutBtn");
+
+  cartList.innerHTML = "";
+
+  if (shoppingCart.length === 0) {
+    cartList.innerHTML = "<li>購物車是空的</li>";
+    cartTotal.innerText = "0";
+    checkoutBtn.disabled = true;
+    return;
+  }
+
+  let total = 0;
+  shoppingCart.forEach((item, index) => {
+    const li = document.createElement("li");
+    li.innerHTML = item.name + " - " + item.price + " 元 <button onclick=\"removeFromCart(" + index + ")\" style=\"background-color: #ff6b6b; color: white;\">移除</button>";
+    cartList.appendChild(li);
+    total += item.price;
+  });
+
+  cartTotal.innerText = total;
+  checkoutBtn.disabled = false;
+}
+
+window.requestRefund = async function (orderId, itemName, itemPrice) {
+  if (!currentId) {
+    showMessage("請先登入。");
+    return;
+  }
+
+  if (!confirm("確定要申請退單 " + itemName + " (" + itemPrice + " 元) 嗎?")) {
+    return;
+  }
+
+  try {
+    await addDoc(collection(db, "refundRequests"), {
+      orderId,
+      userId: currentId,
+      itemName,
+      itemPrice,
+      status: "pending",
+      createdAt: serverTimestamp()
+    });
+    showMessage("已申請退單 " + itemName + "，請等待管理員審核。", "green");
+  } catch (error) {
+    console.error(error);
+    showMessage("申請退單失敗，請稍後再試。", "red");
+  }
+};
+
+window.loadRefundRequests = async function () {
+  if (currentRole !== "admin") {
+    showMessage("只有管理員可以查看退單申請。", "red");
+    return;
+  }
+
+  try {
+    const requestsQuery = query(
+      collection(db, "refundRequests"),
+      where("status", "==", "pending")
+    );
+    const querySnapshot = await getDocs(requestsQuery);
+    const refundList = document.getElementById("refundRequestsList");
+    refundList.innerHTML = "";
+
+    if (querySnapshot.empty) {
+      refundList.innerHTML = "<li>目前沒有待審核的退單申請。</li>";
+      return;
+    }
+
+    querySnapshot.forEach((docSnap) => {
+      const request = docSnap.data();
+      const requestId = docSnap.id;
+      const li = document.createElement("li");
+      const time = request.createdAt?.toDate ? request.createdAt.toDate().toLocaleString() : "幾秒前";
+      li.innerHTML = time + "：" + request.userId + " 申請退單 " + request.itemName + " (" + request.itemPrice + " 元)";
+      
+      const approveBtn = document.createElement("button");
+      approveBtn.innerText = "批准";
+      approveBtn.style.cssText = "background-color: #51cf66; color: white; margin-left: 0.5em;";
+      approveBtn.onclick = () => approveRefund(requestId, request.userId, request.itemPrice);
+      
+      const rejectBtn = document.createElement("button");
+      rejectBtn.innerText = "拒絕";
+      rejectBtn.style.cssText = "background-color: #ff6b6b; color: white; margin-left: 0.5em;";
+      rejectBtn.onclick = () => rejectRefund(requestId);
+      
+      li.appendChild(approveBtn);
+      li.appendChild(rejectBtn);
+      refundList.appendChild(li);
+    });
+  } catch (error) {
+    console.error(error);
+    showMessage("載入退單申請失敗。", "red");
+  }
+};
+
+window.approveRefund = async function (requestId, userId, itemPrice) {
+  try {
+    const userRef = doc(db, "users", userId);
+    const snap = await getDoc(userRef);
+    const balance = snap.data()?.balance ?? 0;
+
+    await setDoc(userRef, { balance: balance + itemPrice }, { merge: true });
+    await setDoc(doc(db, "refundRequests", requestId), { status: "approved" }, { merge: true });
+    await loadRefundRequests();
+    showMessage("已批准 " + userId + " 的退單申請，退款 " + itemPrice + " 元。", "green");
+  } catch (error) {
+    console.error(error);
+    showMessage("批准退單失敗，請稍後再試。", "red");
+  }
+};
+
+window.rejectRefund = async function (requestId) {
+  try {
+    await setDoc(doc(db, "refundRequests", requestId), { status: "rejected" }, { merge: true });
+    await loadRefundRequests();
+    showMessage("已拒絕該退單申請。", "green");
+  } catch (error) {
+    console.error(error);
+    showMessage("拒絕退單失敗，請稍後再試。", "red");
+  }
+};
+</script>
+
+<h2>菜單</h2>
+<ul id="menu"></ul>
+
+<h2>購物車</h2>
+<ul id="cartItems"></ul>
+<p><strong>購物車總計：<span id="cartTotal">0</span> 元</strong></p>
+<button onclick="checkoutCart()" id="checkoutBtn" style="background-color: #51cf66; color: white; padding: 0.5em 1em; border: none; cursor: pointer;" disabled>結帳</button>
+<button onclick="clearCart()" style="background-color: #ff8c42; color: white; padding: 0.5em 1em; border: none; cursor: pointer;">清空購物車</button>
+
+<h2>點餐紀錄</h2>
+<ul id="orderHistory"></ul>
+
+</body>
+</html>
