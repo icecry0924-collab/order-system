@@ -314,22 +314,29 @@ window.viewTodayAllOrders = async function () {
       const studentId = order.userId;
       const itemName = order.name;
 
-      // 統計學生消費
+      // 統計學生消費（未退費的）
       if (!studentTotals[studentId]) {
         studentTotals[studentId] = { count: 0, total: 0, orders: [] };
       }
-      studentTotals[studentId].count++;
-      studentTotals[studentId].total += order.price;
+      if (!order.refunded) {
+        studentTotals[studentId].count++;
+        studentTotals[studentId].total += order.price;
+      }
       studentTotals[studentId].orders.push(order);
 
-      // 統計餐點銷售
+      // 統計餐點銷售（未退費的）
       if (!itemTotals[itemName]) {
         itemTotals[itemName] = { count: 0, total: 0 };
       }
-      itemTotals[itemName].count++;
-      itemTotals[itemName].total += order.price;
+      if (!order.refunded) {
+        itemTotals[itemName].count++;
+        itemTotals[itemName].total += order.price;
+      }
 
-      totalRevenue += order.price;
+      // 如果未退費，才計入總營收
+      if (!order.refunded) {
+        totalRevenue += order.price;
+      }
     });
 
     // 顯示每個學生的訂單
@@ -347,6 +354,11 @@ window.viewTodayAllOrders = async function () {
         const li = document.createElement("li");
         const time = order.createdAt?.toDate ? order.createdAt.toDate().toLocaleString() : "幾秒前";
         li.innerText = "  " + time + "：" + order.name + " - " + order.price + " 元";
+        if (order.refunded) {
+          li.innerText += " (已退費)";
+          li.style.textDecoration = "line-through";
+          li.style.color = "#888";
+        }
         li.style.marginLeft = "1em";
         adminOrdersList.appendChild(li);
       });
@@ -463,8 +475,13 @@ async function loadOrderHistory() {
       const li = document.createElement("li");
       const time = order.createdAt?.toDate ? order.createdAt.toDate().toLocaleString() : "幾秒前";
       li.innerText = time + "：" + order.name + " - " + order.price + " 元";
+      if (order.refunded) {
+        li.innerText += " (已退費)";
+        li.style.textDecoration = "line-through";
+        li.style.color = "#888";
+      }
       
-      if (currentRole !== "admin" && order.docId) {
+      if (currentRole !== "admin" && order.docId && !order.refunded) {
         const refundBtn = document.createElement("button");
         refundBtn.innerText = "申請退單";
         refundBtn.style.cssText = "background-color: #ffa500; color: white; margin-left: 0.5em; cursor: pointer;";
@@ -691,10 +708,10 @@ window.approveRefund = async function (requestId, userId, itemPrice, orderId) {
     const balance = snap.data()?.balance ?? 0;
 
     await setDoc(userRef, { balance: balance + itemPrice }, { merge: true });
-    await deleteDoc(doc(db, "orders", orderId));
+    await setDoc(doc(db, "orders", orderId), { refunded: true }, { merge: true });
     await setDoc(doc(db, "refundRequests", requestId), { status: "approved" }, { merge: true });
     await loadRefundRequests();
-    showMessage("已批准 " + userId + " 的退單申請，退款 " + itemPrice + " 元，並取消該筆訂單。", "green");
+    showMessage("已批准 " + userId + " 的退單申請，退款 " + itemPrice + " 元，並標記該筆訂單為已退費。", "green");
   } catch (error) {
     console.error(error);
     showMessage("批准退單失敗，請稍後再試。", "red");
