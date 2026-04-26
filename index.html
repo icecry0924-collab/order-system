@@ -667,7 +667,7 @@ window.loadRefundRequests = async function () {
       const approveBtn = document.createElement("button");
       approveBtn.innerText = "批准";
       approveBtn.style.cssText = "background-color: #51cf66; color: white; margin-left: 0.5em;";
-      approveBtn.onclick = () => approveRefund(requestId, request.userId, request.itemPrice);
+      approveBtn.onclick = () => approveRefund(requestId, request.userId, request.itemPrice, request.orderId);
       
       const rejectBtn = document.createElement("button");
       rejectBtn.innerText = "拒絕";
@@ -684,16 +684,17 @@ window.loadRefundRequests = async function () {
   }
 };
 
-window.approveRefund = async function (requestId, userId, itemPrice) {
+window.approveRefund = async function (requestId, userId, itemPrice, orderId) {
   try {
     const userRef = doc(db, "users", userId);
     const snap = await getDoc(userRef);
     const balance = snap.data()?.balance ?? 0;
 
     await setDoc(userRef, { balance: balance + itemPrice }, { merge: true });
+    await deleteDoc(doc(db, "orders", orderId));
     await setDoc(doc(db, "refundRequests", requestId), { status: "approved" }, { merge: true });
     await loadRefundRequests();
-    showMessage("已批准 " + userId + " 的退單申請，退款 " + itemPrice + " 元。", "green");
+    showMessage("已批准 " + userId + " 的退單申請，退款 " + itemPrice + " 元，並取消該筆訂單。", "green");
   } catch (error) {
     console.error(error);
     showMessage("批准退單失敗，請稍後再試。", "red");
